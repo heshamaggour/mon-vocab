@@ -47,7 +47,8 @@ async function callAPI(system, userMsg, maxTokens = 4000) {
   });
   if (!res.ok) throw new Error(`API error ${res.status}`);
   const data = await res.json();
-  return data.content?.find(b => b.type === "text")?.text || "";
+const raw = data.content?.find(b => b.type === "text")?.text || "";
+return raw.replace(/^```json\s*\n?/, "").replace(/\n?```\s*$/, "");
 }
 
 async function extractLesson(text) {
