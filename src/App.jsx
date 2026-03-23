@@ -76,8 +76,8 @@ Return ONLY valid JSON (no markdown, no backticks):
 }
 
 Be thorough. Extract every word, rule, and exercise. For verbs provide all 3 tenses. For exercises, preserve the original French prompts and correct answers exactly. Gender is "m"/"f" for nouns, null otherwise.`;
-  const raw = await callAPI(sys, text);
-  return JSON.parse(raw);
+const raw = await callAPI(sys, text, 16000);
+return JSON.parse(raw);
 }
 
 async function generateExercises(vocab, verbs, grammar) {
