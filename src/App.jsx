@@ -121,8 +121,7 @@ async function speak(text) {
       if (res.ok) {
         const data = await res.json();
         const audio = new Audio("data:audio/mp3;base64," + data.audioContent);
-        audio.play();
-        return;
+        try { await audio.play(); return; } catch(e) { console.warn("Autoplay blocked, falling back:", e); }
       }
     } catch (e) { console.warn("Google TTS failed, falling back:", e); }
   }
@@ -440,6 +439,9 @@ function FlashcardTab({ vocab }) {
             {flipped ? (<div style={s.cardBack}><p style={s.cardAnswer}>{answer}</p>{card.example && <p style={s.cardExample}>{card.example}</p>}</div>) : <p style={s.tapHint}>tap to reveal</p>}
           </div>
           {flipped && (<div style={s.cardActions}>
+            <button style={{ ...s.pronPlay, marginRight:"auto", marginLeft:"auto", marginBottom:4 }} onClick={e => { e.stopPropagation(); speak(card.french); }}>🔊</button>
+          </div>)}
+          {flipped && (<div style={s.cardActions}>
             <button style={{ ...s.btnSm, ...s.btnRed, flex:1 }} onClick={() => flipAdvance(false)}>↻ Review</button>
             <button style={{ ...s.btnSm, ...s.btnGreen, flex:1 }} onClick={() => flipAdvance(true)}>✓ Got it</button>
           </div>)}
@@ -462,6 +464,7 @@ function FlashcardTab({ vocab }) {
                 {isLoose && <p style={{ color:C.amber, fontWeight:600, fontSize:16, margin:0 }}>~ Right word, watch the accents → {answer}</p>}
                 {isWrong && <p style={{ color:C.red, fontWeight:600, fontSize:16, margin:0 }}>✗ {answer}</p>}
                 {card.example && <p style={s.cardExample}>{card.example}</p>}
+                <button style={{ ...s.pronPlay, margin:"12px auto 0" }} onClick={() => speak(card.french)}>🔊</button>
               </div>)}
             </div>
           </div>
