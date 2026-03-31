@@ -30,7 +30,7 @@ function saveData(key, value) {
 }
 
 // ── API helpers ──────────────────────────────────────────────────────
-function getConfig() { return loadData(CONFIG_KEY, { proxyUrl: "" }); }
+function getConfig() { return loadData(CONFIG_KEY, { proxyUrl: "", googleTtsKey: "" }); }
 
 async function callAPI(system, userMsg, maxTokens = 4000) {
   const { proxyUrl } = getConfig();
@@ -102,7 +102,31 @@ Return ONLY valid JSON (no markdown, no backticks):
 }
 
 // ── speech synthesis ─────────────────────────────────────────────────
-function speak(text) {
+async function speak(text) {
+  const { googleTtsKey } = getConfig();
+  if (googleTtsKey) {
+    try {
+      const res = await fetch(
+        `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleTtsKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: { text },
+            voice: { languageCode: "fr-FR", name: "fr-FR-Standard-A" },
+            audioConfig: { audioEncoding: "MP3", speakingRate: 0.85 },
+          }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const audio = new Audio("data:audio/mp3;base64," + data.audioContent);
+        audio.play();
+        return;
+      }
+    } catch (e) { console.warn("Google TTS failed, falling back:", e); }
+  }
+  // fallback: browser Web Speech API
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
@@ -223,6 +247,7 @@ const s = {
   dropLabel: { fontSize:14, color:C.muted, margin:0 },
   fileName: { fontSize:13, color:C.accent, fontWeight:600, marginTop:8 },
   importToast: { margin:"0 16px 8px", padding:"10px 14px", fontSize:13, color:"#2d6a3e", background:"#e8f5e9", borderRadius:8, textAlign:"center" },
+  extractingBanner: { margin:"0 16px 8px", padding:"10px 14px", fontSize:13, color:C.accent, background:C.badge, borderRadius:8, textAlign:"center", display:"flex", alignItems:"center", justifyContent:"center", gap:8 },
 
   subTabs: { display:"flex", gap:8, marginBottom:16 },
   subTab: { fontSize:13, fontWeight:600, padding:"6px 14px", borderRadius:8, border:`1.5px solid ${C.border}`, background:C.card, color:C.muted, cursor:"pointer", fontFamily:"inherit" },
@@ -283,15 +308,24 @@ function SettingsTab() {
         <p style={s.settingsHint}>
           This is the URL of your Cloudflare Worker that proxies requests to the Anthropic API. See the README for setup instructions.
         </p>
-        {saved && <p style={s.settingsSaved}>✓ Saved</p>}
       </div>
+      <div style={s.settingsCard}>
+        <label style={s.settingsLabel}>Google Cloud TTS API key <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
+        <input value={config.googleTtsKey||""} onChange={e => setConfig(c => ({...c, googleTtsKey: e.target.value}))}
+          style={s.settingsInput} placeholder="AIza…" type="password" />
+        <p style={s.settingsHint}>
+          Enables high-quality French pronunciation via Google Cloud Text-to-Speech. Free up to 1M characters/month.{" "}
+          <a href="https://console.cloud.google.com/apis/library/texttospeech.googleapis.com" target="_blank" rel="noreferrer" style={{color:C.accent}}>Enable the API →</a>
+        </p>
+      </div>
+      {saved && <p style={s.settingsSaved}>✓ Saved</p>}
       <button style={s.btn} onClick={handleSave}>Save settings</button>
     </div>
   );
 }
 
 // ── Import ───────────────────────────────────────────────────────────
-function ImportTab({ onExtracted, loading, setLoading }) {
+function ImportTab({ onExtracted, onError, extracting, setExtracting }) {
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -308,17 +342,16 @@ function ImportTab({ onExtracted, loading, setLoading }) {
 
   const handleDrop = (e) => { e.preventDefault(); setDragging(false); processFile(e.dataTransfer.files[0]); };
 
-  const handleExtract = async () => {
+  const handleExtract = () => {
     if (!text.trim()) return;
-    setLoading(true); setError("");
-    try {
-      const result = await extractLesson(text.trim());
-      onExtracted(result); setText(""); setFileName("");
-    } catch (e) {
-      setError(e.message?.includes("proxy") ? "Set your proxy URL in Settings first." : "Extraction failed — check your text and try again.");
-      console.error(e);
-    }
-    setLoading(false);
+    setExtracting(true); setError(""); setText(""); setFileName("");
+    extractLesson(text.trim())
+      .then(result => onExtracted(result))
+      .catch(e => {
+        setError(e.message?.includes("proxy") ? "Set your proxy URL in Settings first." : "Extraction failed — check your text and try again.");
+        console.error(e);
+        onError();
+      });
   };
 
   return (
@@ -332,9 +365,10 @@ function ImportTab({ onExtracted, loading, setLoading }) {
       </div>
       <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Or paste your lesson notes here…" style={s.textarea} rows={8} />
       {error && <p style={s.error}>{error}</p>}
-      <button onClick={handleExtract} disabled={loading || !text.trim()} style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}>
-        {loading ? "Extracting…" : "Extract vocabulary & grammar"}
+      <button onClick={handleExtract} disabled={extracting || !text.trim()} style={{ ...s.btn, ...(extracting ? s.btnDisabled : {}) }}>
+        {extracting ? "Extracting in background…" : "Extract vocabulary & grammar"}
       </button>
+      {extracting && <p style={s.hint}>Feel free to switch tabs and practise while this runs.</p>}
     </div>
   );
 }
@@ -584,33 +618,43 @@ export default function App() {
   const [verbs, setVerbs] = useState([]);
   const [grammar, setGrammar] = useState([]);
   const [exercises, setExercises] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [extracting, setExtracting] = useState(false);
   const [lastImport, setLastImport] = useState(null);
+  const vocabRef = useRef([]); const verbsRef = useRef([]); const grammarRef = useRef([]); const exercisesRef = useRef([]);
 
   useEffect(() => {
     const d = loadData(STORAGE_KEY, {});
-    setVocab(d.vocabulary||[]); setVerbs(d.verbs||[]); setGrammar(d.grammar||[]); setExercises(d.exercises||[]);
+    const v=d.vocabulary||[],vb=d.verbs||[],g=d.grammar||[],ex=d.exercises||[];
+    setVocab(v); setVerbs(vb); setGrammar(g); setExercises(ex);
+    vocabRef.current=v; verbsRef.current=vb; grammarRef.current=g; exercisesRef.current=ex;
     window.speechSynthesis?.getVoices();
-    // redirect to settings if no proxy configured
     const cfg = getConfig();
     if (!cfg.proxyUrl) setTab("settings");
   }, []);
 
   const persist = useCallback((v,vb,g,ex) => saveData(STORAGE_KEY, {vocabulary:v,verbs:vb,grammar:g,exercises:ex}), []);
 
-  const handleExtracted = (result) => {
-    const nv=[...vocab],nvb=[...verbs],ng=[...grammar],ne=[...exercises];
+  const handleExtracted = useCallback((result) => {
+    const nv=[...vocabRef.current],nvb=[...verbsRef.current],ng=[...grammarRef.current],ne=[...exercisesRef.current];
     (result.vocabulary||[]).forEach(v=>{if(!nv.some(x=>x.french.toLowerCase()===v.french.toLowerCase()))nv.push(v);});
     (result.verbs||[]).forEach(v=>{if(!nvb.some(x=>x.infinitive.toLowerCase()===v.infinitive.toLowerCase()))nvb.push(v);});
     (result.grammar||[]).forEach(g=>{if(!ng.some(x=>x.rule.toLowerCase()===g.rule.toLowerCase()))ng.push(g);});
     (result.exercises||[]).forEach(e=>ne.push(e));
+    vocabRef.current=nv; verbsRef.current=nvb; grammarRef.current=ng; exercisesRef.current=ne;
     setVocab(nv); setVerbs(nvb); setGrammar(ng); setExercises(ne);
     persist(nv,nvb,ng,ne);
     setLastImport({vocab:(result.vocabulary||[]).length,verbs:(result.verbs||[]).length,grammar:(result.grammar||[]).length,exercises:(result.exercises||[]).length});
-    setTab("flashcards");
-  };
+    setExtracting(false);
+    setTimeout(() => setLastImport(null), 5000);
+  }, [persist]);
 
-  const handleClear = () => { setVocab([]); setVerbs([]); setGrammar([]); setExercises([]); persist([],[],[],[]); setLastImport(null); };
+  const handleExtractionError = useCallback(() => { setExtracting(false); }, []);
+
+  const handleClear = () => {
+    setVocab([]); setVerbs([]); setGrammar([]); setExercises([]);
+    vocabRef.current=[]; verbsRef.current=[]; grammarRef.current=[]; exercisesRef.current=[];
+    persist([],[],[],[]); setLastImport(null);
+  };
   const counts = { bank:vocab.length||null, conjugate:verbs.length||null, exercises:exercises.length||null };
 
   return (
@@ -620,10 +664,16 @@ export default function App() {
         <p style={s.subtitle}>{vocab.length} words · {verbs.length} verbs · {grammar.length} rules</p>
       </header>
       <Tabs active={tab} onChange={setTab} counts={counts} />
-      {lastImport && tab==="flashcards" && (
-        <div style={s.importToast}>Added {lastImport.vocab} words, {lastImport.verbs} verbs, {lastImport.grammar} rules, {lastImport.exercises} exercises</div>
+      {extracting && (
+        <div style={s.extractingBanner}>
+          <span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⟳</span> Extracting in background…
+          <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+        </div>
       )}
-      {tab==="import" && <ImportTab onExtracted={handleExtracted} loading={loading} setLoading={setLoading} />}
+      {lastImport && !extracting && (
+        <div style={s.importToast}>✓ Added {lastImport.vocab} words, {lastImport.verbs} verbs, {lastImport.grammar} rules, {lastImport.exercises} exercises</div>
+      )}
+      {tab==="import" && <ImportTab onExtracted={handleExtracted} onError={handleExtractionError} extracting={extracting} setExtracting={setExtracting} />}
       {tab==="flashcards" && <FlashcardTab vocab={vocab} />}
       {tab==="conjugate" && <ConjugateTab verbs={verbs} />}
       {tab==="exercises" && <ExercisesTab exercises={exercises} vocab={vocab} verbs={verbs} grammar={grammar} />}
