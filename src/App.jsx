@@ -160,7 +160,7 @@ const s = {
   subtitle: { margin:"4px 0 0", fontSize:13, color:C.muted, fontWeight:400 },
 
   tabs: { display:"flex", gap:1, padding:"0 8px", borderBottom:`1px solid ${C.border}`, overflowX:"auto", background:C.bg },
-  tab: { flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2, padding:"10px 4px 8px", fontSize:10, fontWeight:500, color:"#aaa", background:"none", border:"none", borderBottom:"2px solid transparent", cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap", transition:"all 0.15s" },
+  tab: { flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:2, padding:"10px 4px 8px", fontSize:10, fontWeight:500, color:"#aaa", background:"none", border:"none", borderBottom:"2px solid transparent", cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap", transition:"all 0.15s", outline:"none" },
   tabActive: { color:C.accent, borderBottomColor:C.accent },
   tabIcon: { fontSize:15 },
   badge: { fontSize:9, background:C.badge, color:C.accent, borderRadius:8, padding:"1px 6px", fontWeight:600 },
