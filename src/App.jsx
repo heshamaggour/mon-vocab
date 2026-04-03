@@ -31,7 +31,7 @@ function saveData(key, value) {
 }
 
 // ── API helpers ──────────────────────────────────────────────────────
-function getConfig() { return loadData(CONFIG_KEY, { proxyUrl: "", googleTtsKey: "" }); }
+function getConfig() { return loadData(CONFIG_KEY, { proxyUrl: "" }); }
 
 async function callAPI(system, userMsg, maxTokens = 4000) {
   const { proxyUrl } = getConfig();
@@ -157,27 +157,24 @@ Return ONLY valid JSON (no markdown, no backticks):
 
 // ── speech synthesis ─────────────────────────────────────────────────
 async function speak(text) {
-  const { googleTtsKey } = getConfig();
-  if (googleTtsKey) {
+  const { proxyUrl } = getConfig();
+  if (proxyUrl) {
     try {
-      const res = await fetch(
-        `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleTtsKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input: { text },
-            voice: { languageCode: "fr-FR", name: "fr-FR-Standard-A" },
-            audioConfig: { audioEncoding: "MP3", speakingRate: 0.85 },
-          }),
-        }
-      );
+      const res = await fetch(`${proxyUrl}/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: { text },
+          voice: { languageCode: "fr-FR", name: "fr-FR-Standard-A" },
+          audioConfig: { audioEncoding: "MP3", speakingRate: 0.85 },
+        }),
+      });
       if (res.ok) {
         const data = await res.json();
         const audio = new Audio("data:audio/mp3;base64," + data.audioContent);
         try { await audio.play(); return; } catch(e) { console.warn("Autoplay blocked, falling back:", e); }
       }
-    } catch (e) { console.warn("Google TTS failed, falling back:", e); }
+    } catch (e) { console.warn("TTS failed, falling back:", e); }
   }
   // fallback: browser Web Speech API
   if (!window.speechSynthesis) return;
@@ -363,15 +360,7 @@ function SettingsTab() {
           This is the URL of your Cloudflare Worker that proxies requests to the Anthropic API. See the README for setup instructions.
         </p>
       </div>
-      <div style={s.settingsCard}>
-        <label style={s.settingsLabel}>Google Cloud TTS API key <span style={{color:C.muted,fontWeight:400}}>(optional)</span></label>
-        <input value={config.googleTtsKey||""} onChange={e => setConfig(c => ({...c, googleTtsKey: e.target.value}))}
-          style={s.settingsInput} placeholder="AIza…" type="password" />
-        <p style={s.settingsHint}>
-          Enables high-quality French pronunciation via Google Cloud Text-to-Speech. Free up to 1M characters/month.{" "}
-          <a href="https://console.cloud.google.com/apis/library/texttospeech.googleapis.com" target="_blank" rel="noreferrer" style={{color:C.accent}}>Enable the API →</a>
-        </p>
-      </div>
+
       {saved && <p style={s.settingsSaved}>✓ Saved</p>}
       <button style={s.btn} onClick={handleSave}>Save settings</button>
     </div>
@@ -689,18 +678,35 @@ export default function App() {
   const vocabRef = useRef([]); const verbsRef = useRef([]); const grammarRef = useRef([]); const exercisesRef = useRef([]);
 
   useEffect(() => {
-    const d = loadData(STORAGE_KEY, {});
-    const v=d.vocabulary||[],vb=d.verbs||[],g=d.grammar||[],ex=d.exercises||[];
-    setVocab(v); setVerbs(vb); setGrammar(g); setExercises(ex);
-    vocabRef.current=v; verbsRef.current=vb; grammarRef.current=g; exercisesRef.current=ex;
-    const sr = loadData(SR_KEY, {});
-    setSrData(sr); srRef.current = sr;
-    window.speechSynthesis?.getVoices();
     const cfg = getConfig();
-    if (!cfg.proxyUrl) setTab("settings");
+    if (!cfg.proxyUrl) { setTab("settings"); return; }
+    window.speechSynthesis?.getVoices();
+    // Try loading bank from Worker, fall back to localStorage
+    const applyBank = (d) => {
+      const v=d.vocabulary||[],vb=d.verbs||[],g=d.grammar||[],ex=d.exercises||[];
+      setVocab(v); setVerbs(vb); setGrammar(g); setExercises(ex);
+      vocabRef.current=v; verbsRef.current=vb; grammarRef.current=g; exercisesRef.current=ex;
+      const sr = d.sr || loadData(SR_KEY, {});
+      setSrData(sr); srRef.current = sr;
+    };
+    fetch(`${cfg.proxyUrl}/bank`)
+      .then(r => r.json())
+      .then(d => { saveData(STORAGE_KEY, d); applyBank(d); })
+      .catch(() => applyBank(loadData(STORAGE_KEY, {})));
   }, []);
 
-  const persist = useCallback((v,vb,g,ex) => saveData(STORAGE_KEY, {vocabulary:v,verbs:vb,grammar:g,exercises:ex}), []);
+  const persist = useCallback((v,vb,g,ex) => {
+    const bank = {vocabulary:v,verbs:vb,grammar:g,exercises:ex};
+    saveData(STORAGE_KEY, bank);
+    const { proxyUrl } = getConfig();
+    if (proxyUrl) {
+      fetch(`${proxyUrl}/bank`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bank),
+      }).catch(e => console.warn("Bank sync failed:", e));
+    }
+  }, []);
 
   const handleExtracted = useCallback((result) => {
     const nv=[...vocabRef.current],nvb=[...verbsRef.current],ng=[...grammarRef.current],ne=[...exercisesRef.current];
@@ -723,6 +729,14 @@ export default function App() {
     srRef.current = next;
     setSrData(next);
     saveData(SR_KEY, next);
+    const { proxyUrl } = getConfig();
+    if (proxyUrl) {
+      fetch(`${proxyUrl}/bank`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...loadData(STORAGE_KEY, {}), sr: next }),
+      }).catch(e => console.warn("SR sync failed:", e));
+    }
   }, []);
 
   const handleClear = () => {
