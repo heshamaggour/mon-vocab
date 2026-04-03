@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 
 const STORAGE_KEY = "french-vocab-bank";
 const CONFIG_KEY = "french-vocab-config";
+const SR_KEY = "french-vocab-sr";
 const SUBJECTS = ["je", "tu", "il/elle", "nous", "vous", "ils/elles"];
 const TENSES_A1 = ["présent", "passé composé", "futur proche"];
 
@@ -78,6 +79,59 @@ Return ONLY valid JSON (no markdown, no backticks):
 Be thorough. Extract every word, rule, and exercise. For verbs provide all 3 tenses. For exercises, preserve the original French prompts and correct answers exactly. Gender is "m"/"f" for nouns, null otherwise.`;
 const raw = await callAPI(sys, text, 16000);
 return JSON.parse(raw);
+}
+
+// ── spaced repetition ────────────────────────────────────────────────
+function buildSRDeck(vocab, srData) {
+  const now = Date.now();
+  const due = shuffle(vocab.filter(v => { const sr = srData[v.french]; return !sr || sr.due <= now; }));
+  const future = vocab
+    .filter(v => { const sr = srData[v.french]; return sr && sr.due > now; })
+    .sort((a, b) => srData[a.french].due - srData[b.french].due);
+  return [...due, ...future];
+}
+function applySR(word, srData, correct) {
+  const now = Date.now(); const DAY = 86400000;
+  const cur = srData[word] || { interval:1, easeFactor:2.5, reps:0 };
+  let { interval, easeFactor, reps } = cur;
+  if (correct) {
+    reps += 1;
+    interval = reps === 1 ? 1 : reps === 2 ? 6 : Math.round(interval * easeFactor);
+    easeFactor = Math.max(1.3, easeFactor + 0.1);
+  } else {
+    reps = 0; interval = 1;
+    easeFactor = Math.max(1.3, easeFactor - 0.2);
+  }
+  return { ...srData, [word]: { interval, easeFactor, reps, due: now + interval * DAY } };
+}
+
+// ── chunked extraction ────────────────────────────────────────────────
+function chunkText(text, maxChars = 3500) {
+  if (text.length <= maxChars) return [text];
+  const chunks = []; let remaining = text;
+  while (remaining.length > maxChars) {
+    let split = remaining.lastIndexOf("\n", maxChars);
+    if (split < maxChars * 0.4) split = maxChars;
+    chunks.push(remaining.slice(0, split).trim());
+    remaining = remaining.slice(split).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+async function extractLessonChunked(text, onProgress) {
+  const chunks = chunkText(text);
+  if (chunks.length === 1) { onProgress(1, 1); return extractLesson(text); }
+  const results = [];
+  for (let i = 0; i < chunks.length; i++) {
+    onProgress(i + 1, chunks.length);
+    results.push(await extractLesson(chunks[i]));
+  }
+  return {
+    vocabulary: results.flatMap(r => r.vocabulary || []),
+    verbs:      results.flatMap(r => r.verbs      || []),
+    grammar:    results.flatMap(r => r.grammar    || []),
+    exercises:  results.flatMap(r => r.exercises  || []),
+  };
 }
 
 async function generateExercises(vocab, verbs, grammar) {
@@ -235,6 +289,7 @@ const s = {
   bankType: { fontSize:10, color:"#bbb", fontWeight:500, flexShrink:0 },
   bankEn: { color:"#666", marginLeft:"auto" },
   bankPlay: { fontSize:13, cursor:"pointer", background:"none", border:"none", padding:2, color:C.accent },
+  bankExample: { fontSize:12, color:C.muted, fontStyle:"italic", margin:"2px 0 4px 38px", lineHeight:1.5 },
   grammarList: { display:"flex", flexDirection:"column", gap:12 },
   grammarCard: { padding:"14px 16px", background:C.light, borderRadius:10, border:`1px solid ${C.border}` },
   grammarRule: { fontSize:15, fontWeight:600, margin:0 },
@@ -324,7 +379,7 @@ function SettingsTab() {
 }
 
 // ── Import ───────────────────────────────────────────────────────────
-function ImportTab({ onExtracted, onError, extracting, setExtracting }) {
+function ImportTab({ onExtracted, onError, extracting, setExtracting, setExtractProgress }) {
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -344,7 +399,7 @@ function ImportTab({ onExtracted, onError, extracting, setExtracting }) {
   const handleExtract = () => {
     if (!text.trim()) return;
     setExtracting(true); setError(""); setText(""); setFileName("");
-    extractLesson(text.trim())
+    extractLessonChunked(text.trim(), (cur, total) => setExtractProgress(total > 1 ? `Chunk ${cur} of ${total}…` : "Extracting…"))
       .then(result => onExtracted(result))
       .catch(e => {
         setError(e.message?.includes("proxy") ? "Set your proxy URL in Settings first." : "Extraction failed — check your text and try again.");
@@ -373,7 +428,7 @@ function ImportTab({ onExtracted, onError, extracting, setExtracting }) {
 }
 
 // ── Cards (flip + written) ───────────────────────────────────────────
-function FlashcardTab({ vocab }) {
+function FlashcardTab({ vocab, srData, onSRUpdate }) {
   const [mode, setMode] = useState("flip");
   const [deck, setDeck] = useState([]);
   const [idx, setIdx] = useState(0);
@@ -385,8 +440,8 @@ function FlashcardTab({ vocab }) {
   const inputRef = useRef();
 
   const resetDeck = useCallback(() => {
-    if (vocab.length) { setDeck(shuffle(vocab)); setIdx(0); setFlipped(false); setUserAns(""); setSubmitted(false); setScore({ correct:0, wrong:0 }); }
-  }, [vocab]);
+    if (vocab.length) { setDeck(buildSRDeck(vocab, srData)); setIdx(0); setFlipped(false); setUserAns(""); setSubmitted(false); setScore({ correct:0, wrong:0 }); }
+  }, [vocab, srData]);
 
   useEffect(() => { resetDeck(); }, [resetDeck, direction, mode]);
 
@@ -408,10 +463,11 @@ function FlashcardTab({ vocab }) {
   const handleWrittenNext = () => {
     const isRight = strictMatch(userAns, answer) || looseMatch(userAns, answer);
     setScore(p => ({ correct:p.correct+(isRight?1:0), wrong:p.wrong+(isRight?0:1) }));
+    onSRUpdate(card.french, isRight);
     setUserAns(""); setSubmitted(false); setIdx(i => i+1);
     setTimeout(() => inputRef.current?.focus(), 50);
   };
-  const flipAdvance = (known) => { setScore(p => ({ correct:p.correct+(known?1:0), wrong:p.wrong+(known?0:1) })); setFlipped(false); setIdx(i => i+1); };
+  const flipAdvance = (known) => { setScore(p => ({ correct:p.correct+(known?1:0), wrong:p.wrong+(known?0:1) })); onSRUpdate(card.french, known); setFlipped(false); setIdx(i => i+1); };
 
   const isExact = submitted && strictMatch(userAns, answer);
   const isLoose = submitted && !isExact && looseMatch(userAns, answer);
@@ -429,6 +485,7 @@ function FlashcardTab({ vocab }) {
       <div style={{ textAlign:"center", marginBottom:12 }}>
         <span style={s.progress}>{idx+1} / {deck.length}</span>
         <span style={{ ...s.progress, marginLeft:16 }}>✓ {score.correct}  ✗ {score.wrong}</span>
+        {card && srData[card.french] && <span style={{ ...s.progress, marginLeft:16, color:C.accent2 }}>interval {srData[card.french].interval}d</span>}
       </div>
 
       {mode === "flip" ? (
@@ -598,9 +655,12 @@ function BankTab({ vocab, verbs, grammar, onClear }) {
       </div></div>
       {filter==="grammar"?(grammar.length?(<div style={s.grammarList}>{grammar.map((g,i)=>(<div key={i} style={s.grammarCard}><p style={s.grammarRule}>{g.rule}</p><p style={s.grammarExpl}>{g.explanation}</p>{g.examples?.map((ex,j)=><p key={j} style={s.grammarEx}>→ {ex}</p>)}</div>))}</div>):<p style={s.empty}>No grammar rules yet.</p>):(
         <div style={s.bankList}>
-          {(filter==="all"?vocab:vocab.filter(v=>v.type===filter)).map((v,i)=>(<div key={i} style={s.bankRow}>
-            <button style={s.bankPlay} onClick={()=>speak(v.french)}>🔊</button>
-            <span style={s.bankFr}>{v.french}</span><span style={s.bankType}>{v.type}{v.gender?` (${v.gender})`:""}</span><span style={s.bankEn}>{v.english}</span>
+          {(filter==="all"?vocab:vocab.filter(v=>v.type===filter)).map((v,i)=>(<div key={i} style={{...s.bankRow, flexWrap:"wrap"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,width:"100%"}}>
+              <button style={s.bankPlay} onClick={()=>speak(v.french)}>🔊</button>
+              <span style={s.bankFr}>{v.french}</span><span style={s.bankType}>{v.type}{v.gender?` (${v.gender})`:""}</span><span style={s.bankEn}>{v.english}</span>
+            </div>
+            {v.example && <p style={s.bankExample}>{v.example}</p>}
           </div>))}
           {filter!=="all"&&vocab.filter(v=>v.type===filter).length===0&&<p style={s.empty}>No {filter}s yet.</p>}
         </div>
@@ -622,7 +682,10 @@ export default function App() {
   const [grammar, setGrammar] = useState([]);
   const [exercises, setExercises] = useState([]);
   const [extracting, setExtracting] = useState(false);
+  const [extractProgress, setExtractProgress] = useState("Extracting…");
   const [lastImport, setLastImport] = useState(null);
+  const [srData, setSrData] = useState({});
+  const srRef = useRef({});
   const vocabRef = useRef([]); const verbsRef = useRef([]); const grammarRef = useRef([]); const exercisesRef = useRef([]);
 
   useEffect(() => {
@@ -630,6 +693,8 @@ export default function App() {
     const v=d.vocabulary||[],vb=d.verbs||[],g=d.grammar||[],ex=d.exercises||[];
     setVocab(v); setVerbs(vb); setGrammar(g); setExercises(ex);
     vocabRef.current=v; verbsRef.current=vb; grammarRef.current=g; exercisesRef.current=ex;
+    const sr = loadData(SR_KEY, {});
+    setSrData(sr); srRef.current = sr;
     window.speechSynthesis?.getVoices();
     const cfg = getConfig();
     if (!cfg.proxyUrl) setTab("settings");
@@ -653,12 +718,21 @@ export default function App() {
 
   const handleExtractionError = useCallback(() => { setExtracting(false); }, []);
 
+  const handleSRUpdate = useCallback((word, correct) => {
+    const next = applySR(word, srRef.current, correct);
+    srRef.current = next;
+    setSrData(next);
+    saveData(SR_KEY, next);
+  }, []);
+
   const handleClear = () => {
     setVocab([]); setVerbs([]); setGrammar([]); setExercises([]);
     vocabRef.current=[]; verbsRef.current=[]; grammarRef.current=[]; exercisesRef.current=[];
+    setSrData({}); srRef.current={}; saveData(SR_KEY, {});
     persist([],[],[],[]); setLastImport(null);
   };
-  const counts = { bank:vocab.length||null, conjugate:verbs.length||null, exercises:exercises.length||null };
+  const dueCount = vocab.filter(v => { const sr = srData[v.french]; return !sr || sr.due <= Date.now(); }).length;
+  const counts = { bank:vocab.length||null, conjugate:verbs.length||null, exercises:exercises.length||null, flashcards:dueCount||null };
 
   return (
     <div style={s.shell}>
@@ -669,15 +743,15 @@ export default function App() {
       <Tabs active={tab} onChange={setTab} counts={counts} />
       {extracting && (
         <div style={s.extractingBanner}>
-          <span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⟳</span> Extracting in background…
+          <span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⟳</span> {extractProgress}
           <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
         </div>
       )}
       {lastImport && !extracting && (
         <div style={s.importToast}>✓ Added {lastImport.vocab} words, {lastImport.verbs} verbs, {lastImport.grammar} rules, {lastImport.exercises} exercises</div>
       )}
-      {tab==="import" && <ImportTab onExtracted={handleExtracted} onError={handleExtractionError} extracting={extracting} setExtracting={setExtracting} />}
-      {tab==="flashcards" && <FlashcardTab vocab={vocab} />}
+      {tab==="import" && <ImportTab onExtracted={handleExtracted} onError={handleExtractionError} extracting={extracting} setExtracting={setExtracting} setExtractProgress={setExtractProgress} />}
+      {tab==="flashcards" && <FlashcardTab vocab={vocab} srData={srData} onSRUpdate={handleSRUpdate} />}
       {tab==="conjugate" && <ConjugateTab verbs={verbs} />}
       {tab==="exercises" && <ExercisesTab exercises={exercises} vocab={vocab} verbs={verbs} grammar={grammar} />}
       {tab==="pronounce" && <PronounceTab vocab={vocab} verbs={verbs} />}
